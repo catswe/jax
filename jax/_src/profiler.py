@@ -138,14 +138,23 @@ def start_trace(
     # session. Otherwise on Cloud TPU, libtpu may not be initialized before
     # creating the tracer, which will cause the TPU tracer initialization to
     # fail and no TPU operations will be included in the profile.
-    xla_bridge.get_backend()
+    client = xla_bridge.get_backend()
 
-    if profiler_options is None:
-      _profile_state.profile_session = _profiler.ProfilerSession()
-    else:
-      _profile_state.profile_session = _profiler.ProfilerSession(
-          profiler_options
-      )
+    options = profiler_options
+    if options is None:
+      options = ProfileOptions()
+    _profiler.clear_metadata()  # pytype: disable=module-attr
+    try:
+      import jax  # type: ignore
+      _profiler.set_metadata("jax_version", jax.__version__)  # pytype: disable=module-attr
+      jaxlib_version = jax.lib.version.__version__
+      if client.platform == "tpu":
+        jaxlib_version += f" ({client.platform_version})"
+      _profiler.set_metadata("jaxlib_version", jaxlib_version)  # pytype: disable=module-attr
+    except (ImportError, AttributeError):
+      _profiler.set_metadata("jax_version", "unknown")  # pytype: disable=module-attr
+      _profiler.set_metadata("jaxlib_version", "unknown")  # pytype: disable=module-attr
+    _profile_state.profile_session = _profiler.ProfilerSession(options)
     _profile_state.create_perfetto_link = create_perfetto_link
     _profile_state.create_perfetto_trace = (
         create_perfetto_trace or create_perfetto_link)
@@ -226,6 +235,7 @@ def stop_trace():
       if _profile_state.create_perfetto_link:
         _host_perfetto_trace_file(abs_filename)
     _profile_state.reset()
+    _profiler.clear_metadata()  # pytype: disable=module-attr
 
 
 def stop_and_get_fdo_profile() -> bytes | str:
@@ -240,6 +250,7 @@ def stop_and_get_fdo_profile() -> bytes | str:
     xspace = _profile_state.profile_session.stop()
     fdo_profile = _profiler.get_fdo_profile(xspace)
     _profile_state.reset()
+    _profiler.clear_metadata()  # pytype: disable=module-attr
     return fdo_profile
 
 
