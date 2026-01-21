@@ -555,6 +555,9 @@ ds = DynamicSlice
 def memref_slice(ref: ir.Value, index) -> ir.Value:
   ref_ty = ir.MemRefType(ref.type)
   base_indices, slice_shape, is_squeezed = parse_indices(index, ref_ty.shape)
+  if hasattr(dialect, "memref_slice"):
+    return dialect.memref_slice(ref, base_indices, slice_shape, is_squeezed)
+
   # TODO(apaszke): Check that slice is within the memref (indices might be
   # dynamic, but we can at least catch some OOB slices).
 
@@ -781,6 +784,8 @@ def memref_fold(
 
 def memref_unfold(ref: ir.Value, dim, factors) -> ir.Value:
   """Unfolds dim into two dimensions, the size of leading one given be major_factor."""
+  if hasattr(dialect, "memref_unfold"):
+    return dialect.memref_unfold(ref, dim, factors)
   ref_ty = ir.MemRefType(ref.type)
   new_shape = list(ref_ty.shape)
   if sum(f is None for f in factors) > 1:
