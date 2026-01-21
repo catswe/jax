@@ -661,10 +661,17 @@ class PythonPmapTest(jtu.JaxTestCase):
   def testMismatchedAxisSizes(self):
     n = jax.device_count()
     f = self.pmap(lambda x, y: x + y)
-    self.assertRaisesRegex(
-        ValueError,
-        "pmap got inconsistent sizes for array axes to be mapped",
-        lambda: f(self.rng().randn(n), self.rng().randn(n - 1)))
+    if config.pmap_shmap_merge.value:
+      self.assertRaisesRegex(
+          ValueError,
+          # NOTE(dsuo): Different error message on device/version.
+          ".*",
+          lambda: f(self.rng().randn(n), self.rng().randn(n - 1)))
+    else:
+      self.assertRaisesRegex(
+          ValueError,
+          "pmap got inconsistent sizes for array axes to be mapped",
+          lambda: f(self.rng().randn(n), self.rng().randn(n - 1)))
 
   def testInAxesPyTreePrefixMismatchError(self):
     x = jnp.array([3.14])
@@ -682,7 +689,11 @@ class PythonPmapTest(jtu.JaxTestCase):
   def testOutAxesPyTreePrefixMismatchError(self):
     x = jnp.array([3.14])
     f = jax.pmap(lambda x, y: ((x, x), x), out_axes=((0, 0, 0), 0))
-    with self.assertRaisesRegex(ValueError, re.escape("pmap out_axes[0]")):
+    if config.pmap_shmap_merge.value:
+      regex = "pytree structure error: different lengths of tuple at key path.*"
+    else:
+      regex = re.escape("pmap out_axes[0]")
+    with self.assertRaisesRegex(ValueError, regex):
       f(x, x)
 
   @parameterized.named_parameters(
@@ -2606,12 +2617,18 @@ class PmapWithDevicesTest(jtu.JaxTestCase):
     self.assertAllClose(r1, expected, atol=1e-6, rtol=1e-3)
 
   def testNoDevicesError(self):
-    f = pmap(lambda x: x - lax.psum(x, 'i'), axis_name='i', devices=[])
-    shape = (jax.device_count(), 4)
-    x = np.arange(math.prod(shape), dtype=np.float32).reshape(shape)
-    with self.assertRaisesRegex(
-        ValueError, "'devices' argument to pmap must be non-empty, or None."):
-      f(x)
+    if config.pmap_shmap_merge.value:
+      # NOTE(dsuo): ValueError raised when creating pmap'd function now.
+      with self.assertRaisesRegex(
+          ValueError, "'devices' argument to pmap must be non-empty, or None."):
+        _ = pmap(lambda x: x - lax.psum(x, 'i'), axis_name='i', devices=[])
+    else:
+      f = pmap(lambda x: x - lax.psum(x, 'i'), axis_name='i', devices=[])
+      shape = (jax.device_count(), 4)
+      x = np.arange(math.prod(shape), dtype=np.float32).reshape(shape)
+      with self.assertRaisesRegex(
+          ValueError, "'devices' argument to pmap must be non-empty, or None."):
+        f(x)
 
   def testBadAxisSizeError(self):
     if jax.device_count() == 1:
