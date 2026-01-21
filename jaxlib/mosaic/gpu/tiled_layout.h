@@ -25,7 +25,6 @@ limitations under the License.
 
 #include "absl/status/statusor.h"
 #include "mlir/IR/Builders.h"
-#include "mlir/IR/Location.h"
 #include "mlir/IR/Value.h"
 
 namespace jax::mosaic::gpu {
@@ -193,9 +192,10 @@ class TiledLayout {
   const std::vector<Dim>& warp_dims() const { return warp_dims_; }
   const std::vector<Dim>& lane_dims() const { return lane_dims_; }
   int64_t vector_dim() const { return vector_dim_; }
-
-  // Returns the shape of the tiled tiling (without the base tile shape part).
-  absl::StatusOr<std::vector<int64_t>> TiledTilingShape() const;
+  const std::vector<int64_t>& tiled_tiling_shape() const {
+    return tiled_tiling_shape_;
+  }
+  size_t tiled_tiling_rank() const { return tiled_tiling_shape_.size(); };
 
   // Canonicalizes the layout. E.g. If the tiling suffix is
   //   (4, 32, 1, 1, 1), vector_dim = -1, warp_dims = {-5}, lane_dims = {-4}
@@ -243,6 +243,17 @@ class TiledLayout {
   // Returns a layout with the given dimensions reduced across `axes`.
   absl::StatusOr<TiledLayout> Reduce(const std::vector<int64_t>& axes) const;
 
+  // Returns the nd-indices of all the elements the current thread is holding
+  // given `shape`. The order of the returned nd-indices is such that the last
+  // dimension of the register shape is iterated over first.
+  //
+  // E.g. for a register shape of (4, 2) the values returned correspond to the
+  // following register order:
+  //   (0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1), (3, 0), (3, 1)
+  absl::StatusOr<std::vector<std::vector<mlir::Value>>> ThreadIdxs(
+      mlir::ImplicitLocOpBuilder& builder,
+      const std::vector<int64_t>& shape) const;
+
   template <typename H>
   friend H AbslHashValue(H h, const TiledLayout& layout) {
     return H::combine(std::move(h), layout.tiling_, layout.warp_dims_,
@@ -257,7 +268,11 @@ class TiledLayout {
       : tiling_(std::move(tiling)),
         warp_dims_(std::move(warp_dims)),
         lane_dims_(std::move(lane_dims)),
-        vector_dim_(vector_dim) {};
+        vector_dim_(vector_dim),
+        tiled_tiling_shape_(TiledTilingShape()) {};
+
+  // Returns the shape of the tiled tiling (without the base tile shape part).
+  std::vector<int64_t> TiledTilingShape() const;
 
   // Turns the linearized thread index `idx` into a vector of full indices for
   // the given dimensions `dims`.
@@ -269,6 +284,10 @@ class TiledLayout {
   std::vector<Dim> warp_dims_;
   std::vector<Dim> lane_dims_;
   int64_t vector_dim_;
+
+  // Tiled tiling shape can be reconstructed from the tiling object. We cache it
+  // to avoid recomputation.
+  std::vector<int64_t> tiled_tiling_shape_;
 };
 
 }  // namespace jax::mosaic::gpu

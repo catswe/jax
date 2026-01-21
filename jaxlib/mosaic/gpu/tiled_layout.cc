@@ -18,6 +18,7 @@ limitations under the License.
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <ostream>
 #include <sstream>
@@ -90,6 +91,40 @@ mlir::Value ThreadIdx(mlir::ImplicitLocOpBuilder& builder) {
   }
 
   return idx;
+}
+
+// Returns the dot product of `a` and `b`.
+mlir::Value DynDot(mlir::ImplicitLocOpBuilder& builder,
+                   const std::vector<mlir::Value>& a,
+                   const std::vector<mlir::Value>& b) {
+  CHECK(a.size() == b.size()) << "Vectors must have the same size";
+  mlir::Value res = mlir::arith::ConstantOp::create(
+      builder, a[0].getType(), builder.getIntegerAttr(a[0].getType(), 0));
+  for (auto [lhs, rhs] : llvm::zip(a, b)) {
+    mlir::Value prod = mlir::arith::MulIOp::create(builder, lhs, rhs);
+    res = mlir::arith::AddIOp::create(builder, res, prod);
+  }
+  return res;
+}
+
+// Returns the nd-indices of all the elements in `shape`.
+std::vector<std::vector<int64_t>> NdIndices(const std::vector<int64_t>& shape) {
+  std::vector<int64_t> idx(shape.size(), 0);
+  std::vector<std::vector<int64_t>> result;
+
+  std::function<void(int64_t)> gen = [&](int64_t rank) {
+    if (rank == shape.size()) {
+      result.push_back(idx);
+      return;
+    }
+    for (size_t j = 0; j < shape[rank]; ++j) {
+      idx[rank] = j;
+      gen(rank + 1);
+    }
+  };
+
+  gen(0);
+  return result;
 }
 
 }  // namespace
@@ -524,19 +559,18 @@ absl::StatusOr<TiledLayout> TiledLayout::Create(Tiling tiling,
   return layout;
 }
 
-absl::StatusOr<std::vector<int64_t>> TiledLayout::TiledTilingShape() const {
+std::vector<int64_t> TiledLayout::TiledTilingShape() const {
   const Tiling::Tile& min_shape = tiling_.tiles()[0];
-  TF_ASSIGN_OR_RETURN(std::vector<int64_t> min_tiled_shape,
-                      tiling_.TileShape(min_shape));
-  return std::vector<int64_t>(min_tiled_shape.begin() + min_shape.size(),
-                              min_tiled_shape.end());
+  auto min_tiled_shape = tiling_.TileShape(min_shape);
+  CHECK_OK(min_tiled_shape) << "Expecting tiling to be valid by construction";
+  return std::vector<int64_t>(min_tiled_shape->begin() + min_shape.size(),
+                              min_tiled_shape->end());
 }
 
 absl::StatusOr<TiledLayout> TiledLayout::Canonicalize() const {
   Tiling canonical_tiling = tiling_.Canonicalize();
   const std::vector<int64_t>& s = tiling_.tiles()[0];
-  TF_ASSIGN_OR_RETURN(std::vector<int64_t> tiled_tiling_shape,
-                      TiledTilingShape());
+  std::vector<int64_t> tiled_tiling_shape = TiledTilingShape();
 
   TF_ASSIGN_OR_RETURN(std::vector<int64_t> canonical_tiled_tiling_shape,
                       canonical_tiling.TileShape(s));
@@ -654,15 +688,11 @@ absl::StatusOr<std::vector<mlir::Value>> TiledLayout::LaneIndices(
       builder, i32, builder.getIntegerAttr(i32, WARP_SIZE));
   mlir::Value thread_id = ThreadIdx(builder);
   mlir::Value lane_id = mlir::arith::RemUIOp::create(builder, thread_id, c32);
-  TF_ASSIGN_OR_RETURN(std::vector<int64_t> tiled_tiling_shape,
-                      TiledTilingShape());
   return DelinearizeIndex(builder, lane_id, lane_dims_);
 }
 
 absl::StatusOr<size_t> TiledLayout::VectorLength() const {
-  TF_ASSIGN_OR_RETURN(std::vector<int64_t> tiled_tiling_shape,
-                      TiledTilingShape());
-  return DimSize(vector_dim_, tiled_tiling_shape);
+  return DimSize(vector_dim_, TiledTilingShape());
 }
 
 bool TiledLayout::operator==(const TiledLayout& other) const {
@@ -697,7 +727,7 @@ std::string TiledLayout::ToString() const {
 absl::StatusOr<std::vector<mlir::Value>> TiledLayout::DelinearizeIndex(
     mlir::ImplicitLocOpBuilder& builder, mlir::Value idx,
     const std::vector<TiledLayout::Dim>& dims) const {
-  TF_ASSIGN_OR_RETURN(std::vector<int64_t> tiled_shape, TiledTilingShape());
+  std::vector<int64_t> tiled_shape = TiledTilingShape();
 
   std::vector<int64_t> dims_sizes;
   for (const auto& d : dims) {
@@ -762,7 +792,7 @@ absl::StatusOr<std::vector<int64_t>> TiledLayout::RegistersShape(
 
 absl::StatusOr<std::vector<int64_t>> TiledLayout::ShapeFromRegistersShape(
     const std::vector<int64_t>& shape) const {
-  TF_ASSIGN_OR_RETURN(std::vector<int64_t> tiled_tiling, TiledTilingShape());
+  std::vector<int64_t> tiled_tiling = TiledTilingShape();
   if (shape.size() < tiled_tiling.size()) {
     std::string shape_str = absl::StrCat("(", absl::StrJoin(shape, ", "), ")");
     std::string tiled_tiling_str =
@@ -804,7 +834,7 @@ absl::StatusOr<TiledLayout> TiledLayout::RemoveDimension(int64_t dim) const {
   }
 
   TF_ASSIGN_OR_RETURN(Tiling new_tiling, tiling_.RemoveDimension(dim));
-  TF_ASSIGN_OR_RETURN(std::vector<int64_t> tiled_shape, TiledTilingShape());
+  std::vector<int64_t> tiled_shape = TiledTilingShape();
   TF_ASSIGN_OR_RETURN(std::vector<bool> removed_dim,
                       tiling_.TileDimension(dim));
 
@@ -885,6 +915,65 @@ absl::StatusOr<TiledLayout> TiledLayout::Reduce(
     TF_ASSIGN_OR_RETURN(reduced_layout, reduced_layout.RemoveDimension(a));
   }
   return reduced_layout;
+}
+
+absl::StatusOr<std::vector<std::vector<mlir::Value>>> TiledLayout::ThreadIdxs(
+    mlir::ImplicitLocOpBuilder& builder,
+    const std::vector<int64_t>& shape) const {
+  mlir::Type i32 = builder.getIntegerType(32);
+  mlir::IndexType index_type = builder.getIndexType();
+  std::vector<int64_t> tiled_tiling_shape = TiledTilingShape();
+  TF_ASSIGN_OR_RETURN(std::vector<mlir::Value> lane_indices,
+                      LaneIndices(builder));
+  TF_ASSIGN_OR_RETURN(std::vector<mlir::Value> warp_indices,
+                      WarpIndices(builder));
+
+  std::vector<int64_t> contig_strides(shape.size());
+  int64_t stride = 1;
+  for (int i = shape.size() - 1; i >= 0; --i) {
+    contig_strides[i] = stride;
+    stride *= shape[i];
+  }
+  std::vector<int64_t> tile_strides = tiling_.TileStrides(contig_strides);
+
+  std::vector<mlir::Value> dyn_tile_strides;
+  for (size_t i = tile_strides.size() - tiled_tiling_shape.size();
+       i < tile_strides.size(); ++i) {
+    dyn_tile_strides.push_back(mlir::arith::ConstantOp::create(
+        builder, i32, builder.getIntegerAttr(i32, tile_strides[i])));
+  }
+
+  mlir::Value warp_offset = DynDot(builder, warp_indices, dyn_tile_strides);
+  mlir::Value lane_offset = DynDot(builder, lane_indices, dyn_tile_strides);
+  mlir::Value dyn_offset =
+      mlir::arith::AddIOp::create(builder, warp_offset, lane_offset);
+
+  TF_ASSIGN_OR_RETURN(std::vector<int64_t> reg_shape, RegistersShape(shape));
+  std::vector<std::vector<mlir::Value>> indices;
+
+  for (const std::vector<int64_t>& tile_idx : NdIndices(reg_shape)) {
+    int64_t tile_lin_idx = 0;
+    for (size_t i = 0; i < tile_idx.size(); ++i) {
+      tile_lin_idx += tile_idx[i] * tile_strides[i];
+    }
+    mlir::Value dyn_lin_idx = mlir::arith::AddIOp::create(
+        builder, dyn_offset,
+        mlir::arith::ConstantOp::create(
+            builder, i32, builder.getIntegerAttr(i32, tile_lin_idx)));
+
+    std::vector<mlir::Value> idx;
+    idx.reserve(contig_strides.size());
+    for (const auto& contig_stride : contig_strides) {
+      mlir::Value s = mlir::arith::ConstantOp::create(
+          builder, i32, builder.getIntegerAttr(i32, contig_stride));
+      mlir::Value div = mlir::arith::DivUIOp::create(builder, dyn_lin_idx, s);
+      idx.push_back(mlir::arith::IndexCastOp::create(builder, index_type, div));
+      dyn_lin_idx = mlir::arith::RemUIOp::create(builder, dyn_lin_idx, s);
+    }
+    indices.push_back(idx);
+  }
+
+  return indices;
 }
 
 }  // namespace jax::mosaic::gpu
