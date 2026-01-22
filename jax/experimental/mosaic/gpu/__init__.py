@@ -76,6 +76,7 @@ from .fragmented_array import (
     WGStridedFragLayout as WGStridedFragLayout,
     copy_tiled as copy_tiled,
     optimization_barrier as optimization_barrier,
+    Rounding as Rounding,
 )
 from .utils import (
     BarrierRef as BarrierRef,
