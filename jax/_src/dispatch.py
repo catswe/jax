@@ -518,11 +518,19 @@ def _device_put_sharding_impl(
         return _DeferredShardArg(x, x_sharding, aval, x.committed, copy)
     elif is_single_device_sharding(x_sharding):
       device = x_sharding._device_assignment[0] if device is None else device
+      if (not x._committed and
+          device.process_index != xla_bridge.process_index()):
+        # For uncommitted arrays in McJAX, do not transfer the shard across
+        # processes. The shard from the local uncommitted array will be placed
+        # on the target device.
+        shards, devices = [], []
+      else:
+        shards, devices = [x], [device]
       if copy == ArrayCopySemantics.ALWAYS_COPY:
-        return xc.batched_device_put(aval, SingleDeviceSharding(device), [x],
-                                     [device], True, True)
-      return pxla.batched_device_put(aval, SingleDeviceSharding(device), [x],
-                                     [device])
+        return xc.batched_device_put(aval, SingleDeviceSharding(device), shards,
+                                     devices, True, True)
+      return pxla.batched_device_put(aval, SingleDeviceSharding(device), shards,
+                                     devices)
 
   sh = SingleDeviceSharding(pxla.get_default_device()
                             if device is None else device)
